@@ -5,6 +5,10 @@ subdomain's CNAME record, matches it against known-vulnerable service
 fingerprints (GitHub Pages, Heroku, S3, Azure, Ghost, Shopify, Fastly), and
 confirms the takeover with an HTTP request checking for the service's
 takeover-indicating response.
+
+Scope:
+This tool assumes public internet targets only and will refuse to probe
+private/internal IP ranges (RFC 1918, loopback, link-local, multicast).
 """
 
 import ipaddress
@@ -61,7 +65,15 @@ VULNERABLE_FINGERPRINTS = [
     {"cname_pattern": _AZURE_RE, "service": "Azure", "indicator": {"body": "404 Web Site not found"}},
     {"cname_pattern": _GHOST_RE, "service": "Ghost", "indicator": {"body": "404 Domain Not Found"}},
     {"cname_pattern": _SHOPIFY_RE, "service": "Shopify", "indicator": {"body": "Sorry, this shop"}},
-    {"cname_pattern": _FASTLY_RE, "service": "Fastly", "indicator": {"body": "Fastly error: unknown domain"}},
+    {
+        "cname_pattern": _FASTLY_RE,
+        "service": "Fastly",
+        "indicator": {
+            "status": 500,
+            "body": "Fastly error: unknown domain",
+            "headers": {"x-served-by": "cache"},
+        },
+    },
 ]
 
 _REQUEST_HEADERS = {
@@ -134,6 +146,8 @@ def _check_host_ssrf(hostname: str, resolver=None) -> str | None:
                     if _is_private_or_reserved_ip(ip_str):
                         return f"Host {hostname} resolved to private/reserved IP {ip_str}"
             except Exception:
+                # Intentional fail-open on resolver query errors during pre-check;
+                # unreachable or failing hosts will safely fail downstream in requests.
                 continue
 
     return None
@@ -183,10 +197,7 @@ def _match_fingerprint(cname: str) -> dict | None:
     cname = cname.lower().rstrip(".")
     for fingerprint in VULNERABLE_FINGERPRINTS:
         pattern = fingerprint.get("cname_pattern")
-        if pattern is not None:
-            if pattern.search(cname):
-                return fingerprint
-        elif "cname_contains" in fingerprint and fingerprint["cname_contains"] in cname:
+        if pattern is not None and pattern.search(cname):
             return fingerprint
     return None
 
@@ -229,6 +240,9 @@ def _probe(subdomain: str, resolver=None) -> _ProbeResult:
                 break
 
             try:
+                # Note: requests.get below resolves the host independently via system DNS.
+                # This pre-check minimizes SSRF exposure, though a residual TOCTOU window
+                # remains without socket IP pinning.
                 response = requests.get(
                     current_url,
                     headers=_REQUEST_HEADERS,
@@ -259,8 +273,9 @@ def _probe(subdomain: str, resolver=None) -> _ProbeResult:
                 next_parsed = urlparse(next_url)
                 next_host = (next_parsed.hostname or "").lower()
 
-                # Stop redirect following if target leaves the subdomain scope
-                if next_host and next_host != host and not next_host.endswith("." + host):
+                # Stop redirect following if target leaves the original target subdomain scope
+                target_scope = subdomain_clean.lower()
+                if next_host and next_host != target_scope and not next_host.endswith("." + target_scope):
                     break
 
                 if next_url in visited_urls:
@@ -297,9 +312,11 @@ def _confirms_takeover(subdomain: str, fingerprint: dict, resolver=None) -> _Tak
         else:
             confirmed = False
     if "headers" in indicator:
-        headers = getattr(probe.response, "headers", {})
+        raw_headers = getattr(probe.response, "headers", {})
+        # Support both CaseInsensitiveDict (requests) and plain dicts (tests)
+        headers = {str(k).lower(): v for k, v in raw_headers.items()} if hasattr(raw_headers, "items") else raw_headers
         for header, expected in indicator["headers"].items():
-            actual = headers.get(header, "") if hasattr(headers, "get") else ""
+            actual = headers.get(header.lower(), "") if hasattr(headers, "get") else ""
             if not isinstance(actual, str) or expected.lower() not in actual.lower():
                 confirmed = False
                 break

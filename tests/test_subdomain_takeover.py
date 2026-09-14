@@ -667,16 +667,18 @@ def test_invalid_utf8_dns_record_does_not_escape_enumeration(mock_resolver_class
 
 
 def test_resolve_cname_udp_first_without_forced_tcp():
-    """Item 12: Verify CNAME resolution relies on UDP-first resolution without forcing tcp=True."""
+    """Item 12: Verify CNAME resolution does not force tcp=True on resolver calls."""
     from tools.subdomain_takeover_tool import _resolve_cname
 
     resolver = Mock()
     record = Mock()
     record.__str__ = lambda self: "target.example.net."
-    resolver.resolve.return_value = [record]
+    # First hop returns CNAME target.example.net, second hop returns NoAnswer (clean termination without looping)
+    resolver.resolve.side_effect = [[record], dns.resolver.NoAnswer()]
 
     result = _resolve_cname("sub.example.com", resolver)
 
+    assert result.error is None
     assert result.cname == "target.example.net"
     assert resolver.resolve.call_count == 2
     for call in resolver.resolve.call_args_list:
@@ -711,25 +713,46 @@ def test_fingerprint_regex_patterns_anchored_and_normalized():
 
 
 def test_fastly_fingerprint_refined_indicator():
-    """Item 5: Fastly takeover requires specific 'unknown domain' indicator rather than generic errors."""
+    """Item 5: Fastly takeover requires multi-signal match (CNAME, status 500, body indicator, headers)."""
     from tools.subdomain_takeover_tool import _confirms_takeover, _match_fingerprint
 
     fingerprint = _match_fingerprint("mycdn.fastly.net")
     assert fingerprint is not None
     assert fingerprint["service"] == "Fastly"
 
-    # Specific unknown domain indicator confirms takeover
+    # Multi-signal matching (status=500, body, x-served-by header) confirms takeover
     mock_probe = Mock()
-    mock_probe.response = Mock(status_code=500, text="Fastly error: unknown domain: sub.example.com", headers={})
-    res_confirmed = _confirms_takeover("sub.example.com", fingerprint, resolver=None)
+    mock_probe.errors = ()
+    mock_probe.response = Mock(
+        status_code=500,
+        text="Fastly error: unknown domain: sub.example.com",
+        headers={"X-Served-By": "cache-iad-kiad7000000-IAD"},
+    )
     with patch("tools.subdomain_takeover_tool._probe", return_value=mock_probe):
         res = _confirms_takeover("sub.example.com", fingerprint)
         assert res.status.value == "confirmed"
 
     # Generic error without 'unknown domain' does NOT confirm takeover
     mock_probe_generic = Mock()
-    mock_probe_generic.response = Mock(status_code=500, text="Fastly error: configuration fetch failed", headers={})
+    mock_probe_generic.errors = ()
+    mock_probe_generic.response = Mock(
+        status_code=500,
+        text="Fastly error: configuration fetch failed",
+        headers={"X-Served-By": "cache-iad-kiad7000000-IAD"},
+    )
     with patch("tools.subdomain_takeover_tool._probe", return_value=mock_probe_generic):
+        res = _confirms_takeover("sub.example.com", fingerprint)
+        assert res.status.value == "no_indicator"
+
+    # Correct body and headers but wrong HTTP status code (e.g. 200) does NOT confirm takeover
+    mock_probe_wrong_status = Mock()
+    mock_probe_wrong_status.errors = ()
+    mock_probe_wrong_status.response = Mock(
+        status_code=200,
+        text="Fastly error: unknown domain: sub.example.com",
+        headers={"X-Served-By": "cache-iad-kiad7000000-IAD"},
+    )
+    with patch("tools.subdomain_takeover_tool._probe", return_value=mock_probe_wrong_status):
         res = _confirms_takeover("sub.example.com", fingerprint)
         assert res.status.value == "no_indicator"
 
@@ -744,12 +767,16 @@ def test_explicit_redirect_handling_cross_domain_halt(mock_get):
     redirect_resp.is_redirect = True
     mock_get.return_value = redirect_resp
 
+    # No resolver provided: _check_host_ssrf validates subdomain as public string literal without mocking resolver
     result = _probe("sub.example.com")
     assert result.response is not None
     assert result.response.status_code == 302
-    # Only 1 request should be made for https (and 0 hops followed to external host)
+    # The HTTPS attempt halts at hop 0 without following redirect to external domain;
+    # because HTTPS succeeded (last_response is set and scheme_failed is False), HTTP fallback is not attempted.
     assert mock_get.call_count == 1
     assert "sub.example.com" in mock_get.call_args[0][0]
+    # Explicitly verify the external parking domain was never contacted
+    assert all("external-parking.com" not in call.args[0] for call in mock_get.call_args_list)
 
 
 def test_ssrf_protection_blocks_private_and_loopback_ips():
