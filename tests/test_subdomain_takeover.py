@@ -766,12 +766,15 @@ def test_ssrf_protection_blocks_private_and_loopback_ips():
     # Public IP literals are safe
     assert _check_host_ssrf("93.184.216.34") is None
 
-    # Resolving to private IP via resolver mock
+    # Resolving to private IP via dnspython record objects
+    private_record = dns.rdata.from_text(dns.rdataclass.IN, dns.rdatatype.A, "10.10.10.10")
     resolver = Mock()
-    resolver.resolve.return_value = ["10.10.10.10"]
+    resolver.resolve.return_value = _ResolverAnswer([private_record], ttl=60)
     err = _check_host_ssrf("internal.example.com", resolver=resolver)
     assert err is not None
     assert "private/reserved IP" in err
+    # Confirm short-circuiting on the first "A" record detection before querying "AAAA"
+    assert resolver.resolve.call_count == 1
 
     # _probe returns SSRFBlocked error and avoids making any HTTP requests
     with patch("tools.subdomain_takeover_tool.requests.get") as mock_get:
@@ -779,6 +782,30 @@ def test_ssrf_protection_blocks_private_and_loopback_ips():
         assert probe_res.response is None
         assert any("SSRFBlocked" in e["error"] for e in probe_res.errors)
         mock_get.assert_not_called()
+
+
+@pytest.mark.xfail(reason="Known TOCTOU/DNS rebinding limitation: requests.get resolution is decoupled from pre-validation")
+def test_ssrf_toctou_dns_rebinding_risk():
+    """Document known TOCTOU risk where DNS resolves to public IP during pre-check but rebinds to private IP during requests.get."""
+    from tools.subdomain_takeover_tool import _check_host_ssrf, _probe
+
+    public_record = dns.rdata.from_text(dns.rdataclass.IN, dns.rdatatype.A, "93.184.216.34")
+    resolver = Mock()
+    # Pre-check passes because hostname resolves to a public IP
+    resolver.resolve.return_value = _ResolverAnswer([public_record], ttl=60)
+    err = _check_host_ssrf("rebind.example.com", resolver=resolver)
+    assert err is None
+
+    # Simulate DNS rebinding during actual HTTP fetch:
+    # Pre-check passed, but during requests.get the connection targets an internal resource
+    with patch("tools.subdomain_takeover_tool.requests.get") as mock_get:
+        mock_resp = Mock(status_code=200, text="internal private console", headers={}, is_redirect=False)
+        mock_get.return_value = mock_resp
+
+        probe_res = _probe("rebind.example.com", resolver=resolver)
+        # Without socket-level pinning/validation, requests.get connects through, so SSRFBlocked is not asserted
+        assert probe_res.response is None
+        assert any("SSRFBlocked" in e["error"] for e in probe_res.errors)
 
 
 if __name__ == "__main__":
