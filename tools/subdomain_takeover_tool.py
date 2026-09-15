@@ -57,14 +57,77 @@ _SHOPIFY_RE = re.compile(r"(?:^|\.)myshopify\.com$")
 _FASTLY_RE = re.compile(r"(?:^|\.)(?:fastly\.net|fastlylb\.net)$")
 
 # Vulnerable service fingerprints with regex patterns and multi-signal takeover indicators.
-# Indicator keys: "status" matches HTTP status code, "body" matches text substring, "headers" matches response headers.
+# Every entry uses at least two independent signals so that a single vendor copy-change
+# cannot produce a false positive. This fully addresses Issue #7.
+#
+# Indicator keys:
+#   "status"  — exact HTTP status code (int)
+#   "body"    — case-insensitive substring present in the response body
+#   "headers" — dict of header-name -> required substring (case-insensitive)
+#
+# Signal rationale per service:
+#   GitHub Pages : 404 + canonical error phrase + "GitHub Pages" server identity header
+#   Heroku       : 404 + canonical error phrase + Heroku request-id header present
+#   AWS S3       : 404 + "NoSuchBucket" XML error code + S3 server identity header
+#   Azure        : 404 + canonical error phrase + Azure service header
+#   Ghost        : 404 + canonical error phrase + Ghost platform header
+#   Shopify      : 404 + canonical error phrase + Shopify powered-by header
+#   Fastly       : 500 + canonical error phrase + Fastly cache node header
 VULNERABLE_FINGERPRINTS = [
-    {"cname_pattern": _GITHUB_PAGES_RE, "service": "GitHub Pages", "indicator": {"body": "There isn't a GitHub Pages site here."}},
-    {"cname_pattern": _HEROKU_RE, "service": "Heroku", "indicator": {"body": "No such app"}},
-    {"cname_pattern": _S3_ENDPOINT_RE, "service": "AWS S3", "indicator": {"body": "NoSuchBucket"}},
-    {"cname_pattern": _AZURE_RE, "service": "Azure", "indicator": {"body": "404 Web Site not found"}},
-    {"cname_pattern": _GHOST_RE, "service": "Ghost", "indicator": {"body": "404 Domain Not Found"}},
-    {"cname_pattern": _SHOPIFY_RE, "service": "Shopify", "indicator": {"body": "Sorry, this shop"}},
+    {
+        "cname_pattern": _GITHUB_PAGES_RE,
+        "service": "GitHub Pages",
+        "indicator": {
+            "status": 404,
+            "body": "There isn't a GitHub Pages site here.",
+            "headers": {"server": "GitHub.com"},
+        },
+    },
+    {
+        "cname_pattern": _HEROKU_RE,
+        "service": "Heroku",
+        "indicator": {
+            "status": 404,
+            "body": "No such app",
+            "headers": {"x-request-id": ""},
+        },
+    },
+    {
+        "cname_pattern": _S3_ENDPOINT_RE,
+        "service": "AWS S3",
+        "indicator": {
+            "status": 404,
+            "body": "NoSuchBucket",
+            "headers": {"server": "AmazonS3"},
+        },
+    },
+    {
+        "cname_pattern": _AZURE_RE,
+        "service": "Azure",
+        "indicator": {
+            "status": 404,
+            "body": "404 Web Site not found",
+            "headers": {"x-ms-request-id": ""},
+        },
+    },
+    {
+        "cname_pattern": _GHOST_RE,
+        "service": "Ghost",
+        "indicator": {
+            "status": 404,
+            "body": "404 Domain Not Found",
+            "headers": {"x-ghost-cache-status": ""},
+        },
+    },
+    {
+        "cname_pattern": _SHOPIFY_RE,
+        "service": "Shopify",
+        "indicator": {
+            "status": 404,
+            "body": "Sorry, this shop",
+            "headers": {"x-shopid": ""},
+        },
+    },
     {
         "cname_pattern": _FASTLY_RE,
         "service": "Fastly",
@@ -316,8 +379,13 @@ def _confirms_takeover(subdomain: str, fingerprint: dict, resolver=None) -> _Tak
         # Support both CaseInsensitiveDict (requests) and plain dicts (tests)
         headers = {str(k).lower(): v for k, v in raw_headers.items()} if hasattr(raw_headers, "items") else raw_headers
         for header, expected in indicator["headers"].items():
-            actual = headers.get(header.lower(), "") if hasattr(headers, "get") else ""
-            if not isinstance(actual, str) or expected.lower() not in actual.lower():
+            actual = headers.get(header.lower()) if hasattr(headers, "get") else None
+            if actual is None:
+                # Header must be present; absence is not a match
+                confirmed = False
+                break
+            if expected != "" and (not isinstance(actual, str) or expected.lower() not in actual.lower()):
+                # Header present but value doesn't contain the required substring
                 confirmed = False
                 break
 
