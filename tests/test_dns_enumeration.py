@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, Mock, patch
 import dns.rdata
 import dns.rdataclass
 import dns.rdatatype
+
 from tools import dns_tool
 from tools.dns_tool import dns_enumeration
 
@@ -19,7 +20,6 @@ class _ResolverAnswer(list):
 
 
 class TestDnsEnumeration(unittest.TestCase):
-
     def _make_resolver_answer(self, values):
         """Return a mock dns.resolver answer iterable."""
         records = []
@@ -448,9 +448,7 @@ class TestDnsEnumeration(unittest.TestCase):
             },
         )
         resolver.resolve.assert_any_call("example.com", "A", lifetime=5)
-        resolver.resolve.assert_any_call(
-            "_sip._tcp.example.com", "SRV", lifetime=5
-        )
+        resolver.resolve.assert_any_call("_sip._tcp.example.com", "SRV", lifetime=5)
         resolver.resolve.assert_any_call("www.example.com", "A", lifetime=3)
 
     @patch("tools.dns_tool.dns.resolver.Resolver")
@@ -485,8 +483,12 @@ class TestDnsEnumeration(unittest.TestCase):
 
         # Every lookup failure dnspython documents for resolve() other than
         # NXDOMAIN stays a per-record-type negative, not a scan failure.
-        for error in (real_dns.NoAnswer, real_dns.NoNameservers,
-                      real_dns.LifetimeTimeout, real_dns.YXDOMAIN):
+        for error in (
+            real_dns.NoAnswer,
+            real_dns.NoNameservers,
+            real_dns.LifetimeTimeout,
+            real_dns.YXDOMAIN,
+        ):
             with self.subTest(error=error.__name__):
                 resolver = Mock()
                 resolver.resolve.side_effect = error
@@ -514,8 +516,14 @@ class TestDnsEnumeration(unittest.TestCase):
         # NXDOMAIN is the ordinary outcome for a brute-forced name, and a
         # candidate built by prefixing a label can exceed the 255-octet limit;
         # neither may fail the scan the way NXDOMAIN does for the target.
-        for error in (real_dns.NoAnswer, real_dns.NXDOMAIN, real_dns.NoNameservers,
-                      real_dns.LifetimeTimeout, real_dns.YXDOMAIN, real_name.NameTooLong):
+        for error in (
+            real_dns.NoAnswer,
+            real_dns.NXDOMAIN,
+            real_dns.NoNameservers,
+            real_dns.LifetimeTimeout,
+            real_dns.YXDOMAIN,
+            real_name.NameTooLong,
+        ):
             with self.subTest(error=error.__name__):
                 resolver = Mock()
 
@@ -554,7 +562,9 @@ class TestDnsEnumeration(unittest.TestCase):
         self.assertEqual(result["errors"]["A"], "unexpected: RuntimeError")
 
     @patch("tools.dns_tool.dns.resolver.Resolver")
-    def test_unexpected_error_is_recorded_for_subdomain_lookup(self, mock_resolver_class):
+    def test_unexpected_error_is_recorded_for_subdomain_lookup(
+        self, mock_resolver_class
+    ):
         import dns.resolver as real_dns
 
         resolver = Mock()
@@ -633,7 +643,9 @@ class TestDnsEnumeration(unittest.TestCase):
             if domain == "example.com":
                 raise real_dns.NoAnswer
             if domain == "www.example.com" and rtype == "AAAA":
-                return self._make_resolver_answer(["2606:2800:220:1:248:1893:25c8:1946"])
+                return self._make_resolver_answer(
+                    ["2606:2800:220:1:248:1893:25c8:1946"]
+                )
             if domain == "mail.example.com" and rtype == "CNAME":
                 return self._make_resolver_answer(["example.com."])
             raise real_dns.NoAnswer
@@ -686,16 +698,23 @@ class TestDnsEnumeration(unittest.TestCase):
             ("AAAA", "CNAME", OSError),
         )
         for error_rtype, success_rtype, error_kind in cases:
-            with self.subTest(error_rtype=error_rtype,
-                              success_rtype=success_rtype,
-                              error=error_kind.__name__):
+            with self.subTest(
+                error_rtype=error_rtype,
+                success_rtype=success_rtype,
+                error=error_kind.__name__,
+            ):
                 resolver = Mock()
                 mock_resolver_class.return_value = resolver
 
-                def side_effect(domain, rtype, lifetime=5, tcp=False,
-                                _error_rtype=error_rtype,
-                                _success_rtype=success_rtype,
-                                _error_kind=error_kind):
+                def side_effect(
+                    domain,
+                    rtype,
+                    lifetime=5,
+                    tcp=False,
+                    _error_rtype=error_rtype,
+                    _success_rtype=success_rtype,
+                    _error_kind=error_kind,
+                ):
                     if domain == "example.com":
                         raise real_dns.NoAnswer
                     if domain == "www.example.com":
@@ -738,13 +757,11 @@ class TestDnsEnumeration(unittest.TestCase):
         txt_record = dns.rdata.from_wire(
             dns.rdataclass.IN,
             dns.rdatatype.TXT,
-            bytes([4, 0xff, 0xfe, 0x41, 0x42]),
+            bytes([4, 0xFF, 0xFE, 0x41, 0x42]),
             0,
             5,
         )
-        a_record = dns.rdata.from_text(
-            dns.rdataclass.IN, dns.rdatatype.A, "192.0.2.1"
-        )
+        a_record = dns.rdata.from_text(dns.rdataclass.IN, dns.rdatatype.A, "192.0.2.1")
         resolver = Mock()
 
         def side_effect(domain, rtype, lifetime=5, tcp=False):
@@ -774,7 +791,7 @@ class TestDnsEnumeration(unittest.TestCase):
     def test_invalid_utf8_caa_value_is_recorded_without_ttl(self, mock_resolver_class):
         import dns.resolver as real_dns
 
-        caa_wire = bytes([0, 5]) + b"issue" + bytes([0xff, 0xfe])
+        caa_wire = bytes([0, 5]) + b"issue" + bytes([0xFF, 0xFE])
         caa_record = dns.rdata.from_wire(
             dns.rdataclass.IN,
             dns.rdatatype.CAA,
@@ -832,8 +849,11 @@ class TestDnsEnumeration(unittest.TestCase):
         # Every service named in issue #144 item 6 (SIP, LDAP, XMPP, Kerberos,
         # Autodiscover) is probed and represented in the output.
         expected_services = {
-            "_sip._tcp", "_ldap._tcp", "_xmpp-client._tcp",
-            "_kerberos._tcp", "_autodiscover._tcp",
+            "_sip._tcp",
+            "_ldap._tcp",
+            "_xmpp-client._tcp",
+            "_kerberos._tcp",
+            "_autodiscover._tcp",
         }
         srv_records = result.get("srv_records", {})
         srv_errors = result.get("srv_errors", {})
@@ -845,8 +865,7 @@ class TestDnsEnumeration(unittest.TestCase):
         # A published SRV record is parsed into its fields.
         self.assertEqual(
             srv_records["_sip._tcp"],
-            [{"priority": 10, "weight": 60, "port": 5060,
-              "target": "sip.example.com"}],
+            [{"priority": 10, "weight": 60, "port": 5060, "target": "sip.example.com"}],
         )
         # A service with no SRV record is an empty list with no error...
         self.assertEqual(srv_records["_ldap._tcp"], [])
@@ -865,6 +884,7 @@ class TestDnsEnumeration(unittest.TestCase):
     ):
         import dns.name as real_name
         import dns.resolver as real_dns
+
         from utils.helpers import is_valid_domain
 
         # A 251-octet domain passes is_valid_domain (<=253 octets, labels <=63),
@@ -876,13 +896,16 @@ class TestDnsEnumeration(unittest.TestCase):
 
         # Whichever anticipated lookup failure the SRV path hits, it must be
         # recorded by its bare exception name, never as "unexpected: ...".
-        for error in (real_dns.NoNameservers, real_dns.YXDOMAIN,
-                      real_dns.LifetimeTimeout, real_name.NameTooLong):
+        for error in (
+            real_dns.NoNameservers,
+            real_dns.YXDOMAIN,
+            real_dns.LifetimeTimeout,
+            real_name.NameTooLong,
+        ):
             with self.subTest(error=error.__name__):
                 resolver = Mock()
 
-                def side_effect(name, rtype, lifetime=5, tcp=False,
-                                _error=error):
+                def side_effect(name, rtype, lifetime=5, tcp=False, _error=error):
                     if _error is real_name.NameTooLong:
                         # Mirror the real resolver: only over-long names raise.
                         if len(name) > 255:
@@ -894,12 +917,19 @@ class TestDnsEnumeration(unittest.TestCase):
                 resolver.resolve.side_effect = side_effect
                 mock_resolver_class.return_value = resolver
 
-                domain = long_domain if error is real_name.NameTooLong else "example.com"
+                domain = (
+                    long_domain if error is real_name.NameTooLong else "example.com"
+                )
                 result = dns_enumeration(domain)
 
                 self.assertTrue(result["success"])
-                for service in ("_sip._tcp", "_ldap._tcp", "_xmpp-client._tcp",
-                                "_kerberos._tcp", "_autodiscover._tcp"):
+                for service in (
+                    "_sip._tcp",
+                    "_ldap._tcp",
+                    "_xmpp-client._tcp",
+                    "_kerberos._tcp",
+                    "_autodiscover._tcp",
+                ):
                     resolver.resolve.assert_any_call(
                         f"{service}.{domain}", "SRV", lifetime=5
                     )
@@ -1047,6 +1077,7 @@ class TestDnsEnumeration(unittest.TestCase):
         self.assertIn("192.0.2.1", result["ptr_records"])
         self.assertEqual(result["ptr_records"]["192.0.2.1"], ["host1.example.com"])
         self.assertEqual(result["ptr_errors"], {})
+
 
 
 if __name__ == "__main__":

@@ -23,6 +23,7 @@ We welcome contributions from cybersecurity researchers, software engineers, and
 
 ## 📌 Before You Start
 
+All participants in the AynOps project are expected to follow the [Code of Conduct](CODE_OF_CONDUCT.md) — **challenge the code, not the contributor.**
 Before authoring code or submitting pull requests, please review our foundational development principles:
 
 1. **Non-Destructive & Safe Operations**: AynOps is strictly a reconnaissance and security assessment server. All tools must perform non-destructive, read-only telemetry gathering and analysis. Exploit payloads, denial-of-service triggers, or unauthorized modification mechanics are strictly prohibited.
@@ -45,6 +46,7 @@ Ensure your development environment has the following tools installed:
 - **Nmap**: Network mapper binary available on your system `PATH` ([Download Nmap](https://nmap.org/download.html))
 - **Git**: Distributed version control system ([Download Git](https://git-scm.com/))
 - **Docker** *(Optional)*: For containerized testing ([Download Docker](https://www.docker.com/))
+- **Node.js and npm** *(Required for MCP Inspector only)*: Node.js runtime and npm package manager ([Download Node.js](https://nodejs.org/)). These are required specifically for the MCP Inspector workflow and are not required for running AynOps itself.
 
 ---
 
@@ -95,7 +97,27 @@ nmap --version
 
 ---
 
-### 4. Configure Environment Variables
+### 4. Verify Node.js/npm for MCP Inspector
+
+Node.js, npm, and npx must be accessible in your system `PATH` for the MCP Inspector workflow:
+
+```bash
+node --version
+npm --version
+npx --version
+```
+
+The `npx` command must be resolvable from your system `PATH`, as it is used by FastMCP to launch the Inspector. These tools are only required for the MCP Inspector manual testing workflow and are not needed for running AynOps itself.
+
+- **macOS**: `brew install node`
+- **Debian / Ubuntu / Kali**: `sudo apt update && sudo apt install -y nodejs npm`
+- **Fedora / RHEL**: `sudo dnf install -y nodejs npm`
+- **Arch Linux**: `sudo pacman -S nodejs npm`
+- **Windows**: Run the Node.js installer from [nodejs.org](https://nodejs.org/) and ensure the installation adds Node.js to your system `PATH`.
+
+---
+
+### 5. Configure Environment Variables
 
 Copy `.env.example` to create your local `.env` file:
 
@@ -117,7 +139,7 @@ Copy-Item .env.example .env
 
 ---
 
-### 5. Run the Automated Test Suite
+### 6. Run the Automated Test Suite
 
 Execute the test suite to confirm your local environment is pristine:
 
@@ -222,6 +244,7 @@ Module implementation for my_tool.
 
 from utils.helpers import is_valid_domain, normalize_domain
 
+
 def my_tool(domain: str) -> dict:
     """
     Perform a specialized security audit on the specified domain.
@@ -241,14 +264,10 @@ def my_tool(domain: str) -> dict:
         findings = {
             "target": domain,
             "inspected_endpoints": ["api", "admin"],
-            "status": "secure"
+            "status": "secure",
         }
 
-        return {
-            "success": True,
-            "domain": domain,
-            "data": findings
-        }
+        return {"success": True, "domain": domain, "data": findings}
 
     except Exception as e:
         return {"success": False, "error": f"Execution failed: {str(e)}"}
@@ -258,6 +277,7 @@ def my_tool(domain: str) -> dict:
 
 ```python
 import ipaddress
+
 
 def my_ip_tool(ip_address: str) -> dict:
     try:
@@ -291,11 +311,13 @@ Create a corresponding test suite in `tests/test_my_tool.py`:
 ```python
 from tools.my_tool import my_tool
 
+
 def test_my_tool_success():
     # Test valid input path
     result = my_tool("example.com")
     assert result["success"] is True
     assert result["domain"] == "example.com"
+
 
 def test_my_tool_invalid_domain():
     # Test failure path for invalid domain
@@ -464,6 +486,18 @@ FastMCP ships with an interactive browser-based MCP inspector to inspect tool sc
 # Launch FastMCP Inspector
 uv run fastmcp dev inspector server.py
 ```
+
+> **Note**: This command requires Node.js, npm, and `npx` to be installed and available on your system `PATH`. These are only required for the MCP Inspector workflow and are not needed for running AynOps itself. See the [Verify Node.js/npm for MCP Inspector](#4-verify-nodejsnpm-for-mcp-inspector) section for installation instructions.
+
+When you run this command, `npx` may prompt to install the MCP Inspector package if the required version is not already available locally:
+
+```text
+Need to install the following packages:
+@modelcontextprotocol/inspector@<version>
+Ok to proceed? (y)
+```
+
+Accept the prompt to allow `npx` to obtain the required Inspector package. The package version is managed by FastMCP and should not be hard-coded in your environment.
 
 Verify that:
 - The tool appears in the listed capabilities.
