@@ -35,7 +35,7 @@ MAX_CNAME_DEPTH = 5
 RECORD_TYPES = ["A", "AAAA", "MX", "NS", "TXT", "CNAME", "SOA", "CAA"]
 
 # DNSSEC record types enumerated for the target domain (issue #144, item 4).
-DNSSEC_RECORD_TYPES = ["DNSKEY", "DS", "RRSIG", "NSEC"]
+DNSSEC_RECORD_TYPES = ["DNSKEY", "DS", "RRSIG", "NSEC", "NSEC3"]
 
 # Common subdomains tried during brute-force discovery; adjust to taste.
 COMMON_SUBDOMAINS = [
@@ -221,16 +221,73 @@ def _format_rrsig_record(record) -> dict:
 
 def _format_nsec_record(record) -> dict:
     next_name = getattr(record, "next", None)
+    types = []
+    windows = getattr(record, "windows", None)
+    if isinstance(windows, (tuple, list)):
+        try:
+            from dns.rdtypes.util import Bitmap
+
+            types = Bitmap(windows).to_text().strip().split()
+        except Exception:
+            types = []
+    elif hasattr(record, "types") and isinstance(record.types, list):
+        types = record.types
     return {
         "next": _clean_name(next_name) if next_name else str(record),
+        "types": types,
     }
 
 
-def _resolve_cname_chain(resolver, domain: str, initial_cnames: list) -> list:
+def _format_nsec3_record(record) -> dict:
+    salt = getattr(record, "salt", b"")
+    if isinstance(salt, bytes):
+        salt_hex = salt.hex() if salt else "-"
+    else:
+        salt_hex = str(salt) if salt else "-"
+
+    next_hash = ""
+    if hasattr(record, "_next_text") and callable(record._next_text):
+        try:
+            next_hash = record._next_text()
+        except Exception:
+            next_hash = ""
+    if not next_hash:
+        next_raw = getattr(record, "next", None)
+        if isinstance(next_raw, bytes):
+            next_hash = base64.b32encode(next_raw).decode("ascii").rstrip("=")
+        elif next_raw is not None:
+            next_hash = str(next_raw)
+
+    types = []
+    windows = getattr(record, "windows", None)
+    if isinstance(windows, (tuple, list)):
+        try:
+            from dns.rdtypes.util import Bitmap
+
+            types = Bitmap(windows).to_text().strip().split()
+        except Exception:
+            types = []
+    elif hasattr(record, "types") and isinstance(record.types, list):
+        types = record.types
+
+    return {
+        "algorithm": getattr(record, "algorithm", None),
+        "flags": getattr(record, "flags", None),
+        "iterations": getattr(record, "iterations", None),
+        "salt": salt_hex,
+        "next": next_hash,
+        "types": types,
+    }
+
+
+def _resolve_cname_chain(
+    resolver, domain: str, initial_cnames: list
+) -> tuple[list, dict]:
     """Follow CNAME targets iteratively up to MAX_CNAME_DEPTH with cycle detection."""
     if not initial_cnames:
-        return []
+        return [], {}
     chain = []
+    errors = {}
     seen = {domain.lower().rstrip(".")}
     current = str(initial_cnames[0]).rstrip(".")
     chain.append(current)
@@ -241,34 +298,61 @@ def _resolve_cname_chain(resolver, domain: str, initial_cnames: list) -> list:
             answers = resolver.resolve(current, "CNAME", lifetime=RESOLVER_LIFETIME)
             next_target = _clean_name(answers[0])
             if next_target.lower() in seen:
+                errors["cycle_detected"] = True
                 break
             chain.append(next_target)
             seen.add(next_target.lower())
             current = next_target
-        except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN, dns.exception.DNSException):
+        except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN):
             break
-        except Exception:
+        except LOOKUP_ERRORS as exc:
+            errors[current] = type(exc).__name__
             break
-    return chain
+        except Exception as exc:
+            errors[current] = f"unexpected: {type(exc).__name__}"
+            break
+    else:
+        errors["truncated"] = True
+    return chain, errors
 
 
-def _resolve_ptr_records(resolver, ip_addresses: list) -> tuple[dict, dict]:
+def _lookup_single_ptr(resolver, ip: str) -> tuple[list, str | None]:
+    try:
+        rev_name = dns.reversename.from_address(str(ip))
+        answers = resolver.resolve(rev_name, "PTR", lifetime=RESOLVER_LIFETIME)
+        return [_clean_name(r.target) for r in answers], None
+    except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN):
+        return [], None
+    except LOOKUP_ERRORS as exc:
+        return [], type(exc).__name__
+    except Exception as exc:
+        return [], f"unexpected: {type(exc).__name__}"
+
+
+def _resolve_ptr_records(
+    resolver, ip_addresses: list, executor=None
+) -> tuple[dict, dict]:
     """Perform reverse DNS (PTR) lookups for resolved IP addresses."""
     ptr_records = {}
     ptr_errors = {}
-    for ip in ip_addresses:
-        try:
-            rev_name = dns.reversename.from_address(str(ip))
-            answers = resolver.resolve(rev_name, "PTR", lifetime=RESOLVER_LIFETIME)
-            ptr_records[str(ip)] = [_clean_name(r.target) for r in answers]
-        except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN):
-            ptr_records[str(ip)] = []
-        except LOOKUP_ERRORS as exc:
-            ptr_records[str(ip)] = []
-            ptr_errors[str(ip)] = type(exc).__name__
-        except Exception as exc:
-            ptr_records[str(ip)] = []
-            ptr_errors[str(ip)] = f"unexpected: {type(exc).__name__}"
+    if not ip_addresses:
+        return ptr_records, ptr_errors
+
+    if executor is not None:
+        futures = {
+            executor.submit(_lookup_single_ptr, resolver, ip): ip for ip in ip_addresses
+        }
+        for future, ip in futures.items():
+            targets, err = future.result()
+            ptr_records[str(ip)] = targets
+            if err:
+                ptr_errors[str(ip)] = err
+    else:
+        for ip in ip_addresses:
+            targets, err = _lookup_single_ptr(resolver, ip)
+            ptr_records[str(ip)] = targets
+            if err:
+                ptr_errors[str(ip)] = err
     return ptr_records, ptr_errors
 
 
@@ -309,12 +393,23 @@ def _lookup_subdomain(resolver, full: str) -> tuple[bool, dict]:
 def dns_enumeration(domain: str) -> dict:
     """
     Enumerate DNS records for a domain.
-    Returns A, AAAA, MX, NS, TXT, CNAME, SOA, CAA records (CAA surfaces
-    certificate authority restrictions), per-record-type errors, TTL per record
-    type when available, SRV records for common enterprise services, common
-    subdomains discovered via A/AAAA/CNAME
-    lookups, unexpected subdomain lookup errors, and metadata about the
-    resolver used.
+
+    Returns:
+      - records: A, AAAA, MX, NS, TXT, CNAME, SOA, CAA records (CAA surfaces
+        certificate authority restrictions)
+      - errors: per-record-type lookup errors
+      - ttl: TTL per record type when available
+      - cname_chain: ordered chain of CNAME aliases followed iteratively
+      - cname_errors: errors or signals (e.g. cycle_detected, truncated) during CNAME chaining
+      - dnssec_records: DNSKEY, DS, RRSIG, NSEC, and NSEC3 security records
+      - dnssec_errors: per-record-type errors encountered during DNSSEC queries
+      - ptr_records: reverse DNS PTR lookups for discovered A and AAAA IPs
+      - ptr_errors: per-IP errors encountered during PTR resolution
+      - srv_records: SRV records for common enterprise services
+      - srv_errors: unexpected or anticipated SRV lookup errors
+      - subdomains_found: common subdomains discovered via A/AAAA/CNAME lookups
+      - subdomain_errors: unexpected subdomain lookup errors
+      - resolver: metadata about the resolver used
     """
     domain = normalize_domain(domain)
     if not is_valid_domain(domain):
@@ -499,6 +594,10 @@ def dns_enumeration(domain: str) -> dict:
                         dnssec_records[dnssec_type] = [
                             _format_nsec_record(r) for r in answers
                         ]
+                    elif dnssec_type == "NSEC3":
+                        dnssec_records[dnssec_type] = [
+                            _format_nsec3_record(r) for r in answers
+                        ]
                     else:
                         dnssec_records[dnssec_type] = [str(r) for r in answers]
                 except Exception as exc:
@@ -518,14 +617,18 @@ def dns_enumeration(domain: str) -> dict:
                 subdomain_errors[full] = lookup_errors
 
         # Complete CNAME alias chain resolution (Issue #144, item 8)
-        cname_chain = _resolve_cname_chain(resolver, domain, records.get("CNAME", []))
+        cname_chain, cname_errors = _resolve_cname_chain(
+            resolver, domain, records.get("CNAME", [])
+        )
 
         # Reverse DNS (PTR) lookups for discovered A and AAAA IPs (Issue #144, item 7)
         ip_addresses = []
         for ip in records.get("A", []) + records.get("AAAA", []):
             if ip not in ip_addresses:
                 ip_addresses.append(ip)
-        ptr_records, ptr_errors = _resolve_ptr_records(resolver, ip_addresses)
+        ptr_records, ptr_errors = _resolve_ptr_records(
+            resolver, ip_addresses, executor=executor
+        )
 
     return {
         "success": True,
@@ -533,6 +636,7 @@ def dns_enumeration(domain: str) -> dict:
         "errors": errors,
         "records": records,
         "cname_chain": cname_chain,
+        "cname_errors": cname_errors,
         "dnssec_records": dnssec_records,
         "dnssec_errors": dnssec_errors,
         "ptr_records": ptr_records,

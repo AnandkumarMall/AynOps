@@ -105,10 +105,12 @@ completed.
     "DNSKEY": [],
     "DS": [],
     "RRSIG": [],
-    "NSEC": []
+    "NSEC": [],
+    "NSEC3": []
   },
   "dnssec_errors": {},
   "cname_chain": [],
+  "cname_errors": {},
   "ptr_records": {
     "192.0.2.10": ["host1.example.com"]
   },
@@ -131,9 +133,10 @@ On success, the response contains `success: true` and the following fields:
 | `domain` | string | The normalized input domain: surrounding whitespace removed, lowercased, and any trailing dot removed. |
 | `errors` | object | Maps a target record type such as `A` or `TXT` to an error name. Anticipated lookup failures use the exception name; unexpected lookup failures are prefixed with `unexpected: `. |
 | `records` | object | Contains `A`, `AAAA`, `MX`, `NS`, `TXT`, `CNAME`, `SOA`, and `CAA` results. Missing record answers are represented by empty lists, while each successful record type uses the shape described below. |
-| `dnssec_records` | object | Maps DNSSEC record types (`DNSKEY`, `DS`, `RRSIG`, `NSEC`) to lists of formatted record dictionaries or raw fallback strings. |
+| `dnssec_records` | object | Maps DNSSEC record types (`DNSKEY`, `DS`, `RRSIG`, `NSEC`, `NSEC3`) to lists of formatted record dictionaries or raw fallback strings. |
 | `dnssec_errors` | object | Maps DNSSEC record types to lookup errors encountered during enumeration. |
 | `cname_chain` | array of strings | The ordered sequence of CNAME aliases encountered when resolving canonical names, bounded to a maximum depth with cycle/loop detection. |
+| `cname_errors` | object | Maps CNAME targets to lookup error names if resolution fails prematurely, or records `cycle_detected: true` / `truncated: true`. |
 | `ptr_records` | object | Maps resolved IP addresses (from `A` and `AAAA` records) to lists of discovered reverse DNS PTR hostnames. |
 | `ptr_errors` | object | Maps resolved IP addresses to error names when reverse DNS PTR lookups fail. |
 | `srv_records` | object | Maps `_sip._tcp`, `_ldap._tcp`, `_xmpp-client._tcp`, `_kerberos._tcp`, and `_autodiscover._tcp` to SRV record lists. Each record has integer `priority`, `weight`, and `port` fields plus a cleaned `target`; an unpublished service has an empty list. |
@@ -161,7 +164,8 @@ The `dnssec_records` object uses these per-type shapes:
 | `DNSKEY` | Array of objects with integer `flags`, `protocol`, and `algorithm` fields plus base64-encoded `key`. |
 | `DS` | Array of objects with integer `key_tag`, `algorithm`, and `digest_type` fields plus hex-encoded `digest`. |
 | `RRSIG` | Array of objects with `type_covered`, integer `algorithm`, `labels`, `original_ttl`, `expiration`, `inception`, `key_tag`, cleaned string `signer`, and base64-encoded `signature`. |
-| `NSEC` | Array of objects with cleaned string `next` domain and array of string `windows` (record types). |
+| `NSEC` | Array of objects with cleaned string `next` domain and array of string `types` (record types covered in the type bitmap). |
+| `NSEC3` | Array of objects with integer `algorithm`, `flags`, `iterations`, hex-encoded `salt`, base32-encoded `next` hashed owner name, and array of string `types`. |
 
 ## Errors and timeouts
 
